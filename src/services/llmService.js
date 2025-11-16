@@ -1,126 +1,141 @@
 // src/services/llmService.js
+require("dotenv").config();
 const { GoogleGenAI } = require("@google/genai");
 const { findRubricsForCvAndProject } = require("./ragService");
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-if (!GEMINI_API_KEY) {
-  console.warn("[llmService] GEMINI_API_KEY tidak diset, LLM tidak bisa dipakai.");
-}
-
 const genAI = new GoogleGenAI({
   apiKey: GEMINI_API_KEY,
 });
 
-// ---------- helper: fallback heuristic kalau LLM gagal ----------
-function heuristicFallback({ jobTitle, cvText, reportText }) {
-  const cvLen = (cvText || "").length;
-  const reportLen = (reportText || "").length;
+// ---------- helper: bersihin output JSON dari ```json ... ``` ----------
+function cleanJsonText(raw) {
+  if (!raw) return "";
+  let text = String(raw).trim();
 
-  const cvMatchRate = cvLen > 0 ? 0.5 : 0.0;
-  const projectScore = reportLen > 0 ? 2.5 : 0.0;
-
-  return {
-    cvMatchRate,
-    cvFeedback:
-      cvLen > 0
-        ? "Automatic fallback: CV dinilai secara kasar berdasarkan panjang teks. Disarankan melakukan review manual."
-        : "No CV text was provided. Please submit a CV for proper evaluation.",
-    projectScore,
-    projectFeedback:
-      reportLen > 0
-        ? "Automatic fallback: Project report dinilai secara kasar berdasarkan panjang teks. Disarankan melakukan review manual."
-        : "No project report text was provided. Please submit a project report for proper evaluation.",
-    overallSummary:
-      "LLM evaluation failed or was unavailable. Sistem menggunakan heuristic sederhana berdasarkan panjang dokumen, sehingga keputusan rekrutmen sebaiknya tidak sepenuhnya bergantung pada skor ini.",
-    usedFallback: true,
-  };
-}
-
-// ---------- helper: build prompt ----------
-function buildPrompt({ jobTitle, cvText, reportText, cvRubricsText, projectRubricsText }) {
-  return `
-You are an AI assistant that evaluates internship candidates based on their CV and project report.
-
-Vacancy title: ${jobTitle || "-"}
-
-=== EVALUATION RUBRICS FOR CV ===
-${cvRubricsText || "(no specific CV rubrics, use general best practices: clarity of targeted role, structure, relevance, quantified impact, and technical skills)."}
-
-=== EVALUATION RUBRICS FOR PROJECT REPORT ===
-${projectRubricsText || "(no specific project rubrics, use general best practices: clarity of problem, methodology, technical depth, deployment details, results, and reflection on limitations)."}
-
-=== CANDIDATE CV (RAW TEXT) ===
-${cvText && cvText.trim().length > 0 ? cvText : "(no CV text provided)"}
-
-=== CANDIDATE PROJECT REPORT (RAW TEXT) ===
-${reportText && reportText.trim().length > 0 ? reportText : "(no project report text provided)"}
-
-Task:
-1. Evaluate how well the CV matches the vacancy (0.0–1.0).
-2. Evaluate the project report quality on a 0.0–5.0 scale.
-3. Give short, constructive feedback for CV and project.
-4. Give a concise overall summary.
-
-Return ONLY valid JSON. No explanation, no markdown, no backticks, no extra keys.
-Use exactly this schema:
-
-{
-  "cvMatchRate": 0.0,
-  "cvFeedback": "string",
-  "projectScore": 0.0,
-  "projectFeedback": "string",
-  "overallSummary": "string"
-}
-`;
-}
-
-// ---------- helper: bersihin output JSON dari LLM ----------
-function cleanJsonText(rawText) {
-  if (!rawText) return "";
-
-  let text = rawText.trim();
-
-  // buang ```json ... ```
+  // Kalau dibungkus ```json ... ```
   if (text.startsWith("```")) {
-    text = text.replace(/^```json/i, "").replace(/^```/i, "");
-    text = text.replace(/```$/, "");
-    text = text.trim();
+    // buang baris pertama ``` / ```json
+    text = text.replace(/^```[a-zA-Z]*\s*/, "");
+    // buang ``` terakhir
+    text = text.replace(/```$/, "").trim();
+  }
+
+  // Ambil cuma blok {...} pertama–terakhir
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    text = text.slice(firstBrace, lastBrace + 1);
   }
 
   return text;
 }
 
-// ---------- helper: panggil Gemini dengan retry ----------
+// ---------- helper: bikin prompt ----------
+function buildPrompt({
+  jobTitle,
+  cvText,
+  reportText,
+  cvRubricsText,
+  projectRubricsText,
+}) {
+  return `
+You are evaluating a candidate for a backend / IT internship. Use the provided rubrics and return a STRICT JSON object.
+
+Vacancy title: ${jobTitle || "-"}
+
+=== RAG CV RUBRICS (guidelines) ===
+${cvRubricsText || "-"}
+
+=== RAG PROJECT RUBRICS (guidelines) ===
+${projectRubricsText || "-"}
+
+=== CV TEXT (raw) ===
+${cvText || "(empty)"}
+
+=== PROJECT REPORT TEXT (raw) ===
+${reportText || "(empty)"}
+
+SCORING RULES (jangan tulis skor total, cukup sub-score di JSON):
+
+1) CV scoring – berikan sub-score 1–5 (number) untuk:
+   - technical   : kemampuan teknis backend/IT, tools, stack.
+   - experience  : relevansi pengalaman dengan role.
+   - achievements: pencapaian terukur, impact, hasil nyata.
+   - culture     : kolaborasi, komunikasi, learning attitude, ownership.
+
+   Nanti sistem akan menghitung sendiri weighted score:
+   - technical   = 40%
+   - experience  = 25%
+   - achievements= 20%
+   - culture     = 15%
+
+2) PROJECT scoring – berikan sub-score 1–5 (number) untuk:
+   - correctness   : ketepatan solusi, implementasi, kebenaran teknis.
+   - structure     : arsitektur, modularitas, clean code / desain.
+   - resilience    : error handling, security, scalability, reliability.
+   - documentation : kejelasan penjelasan, struktur laporan, kemudahan dibaca.
+   - creativity    : orisinalitas solusi, pemilihan teknologi, insight tambahan.
+
+   Nanti sistem akan menghitung sendiri overall projectScore (1–5) dari:
+   - correctness   = 30%
+   - structure     = 25%
+   - resilience    = 20%
+   - documentation = 15%
+   - creativity    = 10%
+
+3) OUTPUT FORMAT (PENTING):
+Kembalikan HANYA JSON mentah (tanpa markdown, tanpa backticks), dengan schema PERSIS seperti ini:
+
+{
+  "cvScores": {
+    "technical": 1-5 (number),
+    "experience": 1-5 (number),
+    "achievements": 1-5 (number),
+    "culture": 1-5 (number)
+  },
+  "projectScores": {
+    "correctness": 1-5 (number),
+    "structure": 1-5 (number),
+    "resilience": 1-5 (number),
+    "documentation": 1-5 (number),
+    "creativity": 1-5 (number)
+  },
+  "cvFeedback": "paragraf singkat dalam Bahasa Indonesia",
+  "projectFeedback": "paragraf singkat dalam Bahasa Indonesia",
+  "overallSummary": "ringkasan singkat dalam Bahasa Indonesia"
+}
+
+JANGAN tambahkan teks lain di luar JSON.
+`;
+}
+
+// ---------- helper: retry kalau 429 / 503 ----------
 async function callGeminiWithRetry(prompt, maxRetries = 3) {
   let lastError;
+  const contents = [
+    {
+      role: "user",
+      parts: [{ text: prompt }],
+    },
+  ];
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await genAI.models.generateContent({
         model: MODEL_NAME,
-        contents: prompt,
+        contents,
       });
-
-      // SDK @google/genai punya response.text
-      const rawText =
-        response.text ||
-        (response.response && typeof response.response.text === "function"
-          ? await response.response.text()
-          : "");
-
-      return rawText;
+      return response;
     } catch (err) {
       lastError = err;
-
-      // 503 / 429 -> bisa retry
       if ((err.status === 503 || err.status === 429) && attempt < maxRetries) {
         const delayMs = 1000 * attempt; // 1s, 2s, 3s
         await new Promise((res) => setTimeout(res, delayMs));
         continue;
       }
-
       throw err;
     }
   }
@@ -128,25 +143,48 @@ async function callGeminiWithRetry(prompt, maxRetries = 3) {
   throw lastError;
 }
 
+// ---------- fallback heuristic ----------
+function heuristicFallback({ jobTitle, cvText, reportText }) {
+  const cvLen = cvText ? cvText.length : 0;
+  const reportLen = reportText ? reportText.length : 0;
+
+  const cvMatchRate = Math.max(0.2, Math.min(0.9, cvLen / 8000));
+  const projectScore = Math.max(1, Math.min(5, reportLen / 1500));
+
+  return {
+    cvMatchRate: parseFloat(cvMatchRate.toFixed(2)),
+    projectScore: parseFloat(projectScore.toFixed(2)),
+    cvFeedback:
+      "Automatic fallback evaluation: CV terlihat cukup relevan, namun penilaian ini tidak berasal dari model LLM karena terjadi kegagalan saat memanggil API.",
+    projectFeedback:
+      "Automatic fallback evaluation: Project report dinilai berdasarkan panjang dan struktur dasar teks. Disarankan untuk melakukan review manual.",
+    overallSummary:
+      "Sistem gagal memanggil LLM dan menggunakan heuristic fallback. Untuk keputusan rekrutmen sebaiknya dilakukan penilaian manual tambahan.",
+    usedFallback: true,
+  };
+}
+
 // ---------- fungsi utama dipakai worker ----------
 async function evaluateCandidate({ jobTitle, cvText, reportText }) {
-  const cv = cvText || "";
-  const project = reportText || "";
+  const safeCv = cvText || "";
+  const safeReport = reportText || "";
 
-  // 1) Kalau nggak ada API key -> langsung fallback
+  const fallback = () =>
+    heuristicFallback({ jobTitle, cvText: safeCv, reportText: safeReport });
+
   if (!GEMINI_API_KEY) {
-    console.warn("[llmService] GEMINI_API_KEY tidak diset, pakai fallback heuristic.");
-    return heuristicFallback({ jobTitle, cvText: cv, reportText: project });
+    console.warn("[llmService] GEMINI_API_KEY tidak diset, pakai fallback.");
+    return fallback();
   }
 
-  // 2) Ambil rubrics dari RAG (Qdrant + embedding)
+  // --- ambil rubrics dari RAG (Qdrant) ---
   let cvRubricsText = "";
   let projectRubricsText = "";
 
   try {
     const rag = await findRubricsForCvAndProject({
-      cvText: cv,
-      reportText: project,
+      cvText: safeCv,
+      reportText: safeReport,
     });
 
     cvRubricsText = rag.cvRubricsText || "";
@@ -156,42 +194,98 @@ async function evaluateCandidate({ jobTitle, cvText, reportText }) {
       `[llmService] RAG rubrics: cvLen=${cvRubricsText.length}, projectLen=${projectRubricsText.length}`
     );
   } catch (err) {
-    console.warn("[llmService] Gagal mengambil rubrics dari RAG, lanjut tanpa rubrics spesifik:", err);
+    console.warn("[llmService] Gagal mengambil rubrics dari RAG:", err);
   }
 
-  // 3) Build prompt lengkap
   const prompt = buildPrompt({
     jobTitle,
-    cvText: cv,
-    reportText: project,
+    cvText: safeCv,
+    reportText: safeReport,
     cvRubricsText,
     projectRubricsText,
   });
 
-  // 4) Panggil LLM
   try {
-    const rawText = await callGeminiWithRetry(prompt);
-    const jsonString = cleanJsonText(rawText);
+    const result = await callGeminiWithRetry(prompt);
+
+    // 🔧 Bagian yang diperbaiki: cara ambil teks dari response
+    let rawText = "";
+
+    if (typeof result.response?.text === "function") {
+      // Pola: result.response.text()
+      rawText = await result.response.text();
+    } else if (typeof result.text === "function") {
+      // Pola: result.text()
+      rawText = await result.text();
+    } else if (Array.isArray(result.candidates)) {
+      // Pola: candidates[].content.parts[].text
+      rawText = result.candidates
+        .flatMap((c) => c.content?.parts || [])
+        .map((p) => p.text || "")
+        .join("\n");
+    } else {
+      console.warn(
+        "[llmService] Tidak menemukan text di response, pakai fallback. Raw:",
+        JSON.stringify(result, null, 2)
+      );
+      return fallback();
+    }
+
+    const cleaned = cleanJsonText(rawText);
 
     let parsed;
     try {
-      parsed = JSON.parse(jsonString);
+      parsed = JSON.parse(cleaned);
     } catch (e) {
-      console.warn("[llmService] Response bukan JSON valid, pakai fallback. Raw:", rawText);
-      return heuristicFallback({ jobTitle, cvText: cv, reportText: project });
+      console.warn(
+        "[llmService] Response bukan JSON valid, pakai fallback. Raw:",
+        rawText
+      );
+      return fallback();
     }
 
+    const cvScores = parsed.cvScores || {};
+    const projectScores = parsed.projectScores || {};
+
+    const cvTechnical = Number(cvScores.technical) || 0;
+    const cvExperience = Number(cvScores.experience) || 0;
+    const cvAchievements = Number(cvScores.achievements) || 0;
+    const cvCulture = Number(cvScores.culture) || 0;
+
+    const projectCorrectness = Number(projectScores.correctness) || 0;
+    const projectStructure = Number(projectScores.structure) || 0;
+    const projectResilience = Number(projectScores.resilience) || 0;
+    const projectDocumentation = Number(projectScores.documentation) || 0;
+    const projectCreativity = Number(projectScores.creativity) || 0;
+
+    // --- hitung weighted score pakai rubric (CV: 1–5 -> 0–1, Project: 1–5) ---
+    const cvWeighted =
+      cvTechnical * 0.4 +
+      cvExperience * 0.25 +
+      cvAchievements * 0.2 +
+      cvCulture * 0.15;
+
+    const projectWeighted =
+      projectCorrectness * 0.3 +
+      projectStructure * 0.25 +
+      projectResilience * 0.2 +
+      projectDocumentation * 0.15 +
+      projectCreativity * 0.1;
+
+    const cvMatchRate = parseFloat((cvWeighted / 5).toFixed(2)); // 0–1
+    const projectScore = parseFloat(projectWeighted.toFixed(2)); // 1–5
+
     return {
-      cvMatchRate: Number(parsed.cvMatchRate) || 0,
+      cvMatchRate,
       cvFeedback: parsed.cvFeedback || "",
-      projectScore: Number(parsed.projectScore) || 0,
+      projectScore,
       projectFeedback: parsed.projectFeedback || "",
       overallSummary: parsed.overallSummary || "",
       usedFallback: false,
     };
   } catch (err) {
     console.error("[llmService] LLM call failed, using fallback:", err);
-    return heuristicFallback({ jobTitle, cvText: cv, reportText: project });
+    return fallback();
   }
 }
 
