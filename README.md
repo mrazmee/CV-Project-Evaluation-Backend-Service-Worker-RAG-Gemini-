@@ -9,7 +9,6 @@ Uses:
 - **Background Worker Queue (SQLite DB)**  
 - **PDF Parsing Pipeline**
 
-No frontend required.
 
 ---
 
@@ -87,10 +86,13 @@ DATABASE_URL=file:./dev.db
 ```
 src/
  ├── api/
- │    ├── uploadRoutes.js
- │    └── evaluateRoutes.js
+ │    ├── uploadController.js
+ │    └── evaluateController.js
+ │    └── resultController.js
  ├── worker/
  │    └── jobWorker.js
+ ├── config/
+ │    └── env.js
  ├── services/
  │    ├── llmService.js
  │    ├── ragService.js
@@ -219,7 +221,7 @@ Ensures **consistent, rubric-aligned scoring**.
 
 # 📊 9. Evaluation Formula
 
-## CV Rating (0–1)
+## CV Rating (1–5)
 Weighted components:
 - Skills match — 40%
 - Experience relevance — 25%
