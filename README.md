@@ -9,7 +9,6 @@ Uses:
 - **Background Worker Queue (SQLite DB)**  
 - **PDF Parsing Pipeline**
 
-No frontend required.
 
 ---
 
@@ -219,7 +218,7 @@ Ensures **consistent, rubric-aligned scoring**.
 
 # 📊 9. Evaluation Formula
 
-## CV Rating (0–1)
+## CV Rating (1–5)
 Weighted components:
 - Skills match — 40%
 - Experience relevance — 25%
