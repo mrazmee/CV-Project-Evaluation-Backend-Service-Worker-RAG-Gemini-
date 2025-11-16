@@ -156,8 +156,9 @@ Fields:
 Response:
 ```json
 {
-  "cvFileId": 12,
-  "reportFileId": 13
+    "success": true,
+    "cv_id": 13,
+    "report_id": 14
 }
 ```
 
@@ -172,17 +173,18 @@ Content-Type: application/json
 Body:
 ```json
 {
-  "cvFileId": 12,
-  "reportFileId": 13,
-  "jobTitle": "Backend Intern"
+  "job_title": "Backend Engineer Intern",
+  "cv_id": 13,
+  "report_id": 14
 }
 ```
 
 Response:
 ```json
 {
-  "jobId": 24,
-  "status": "queued"
+    "success": true,
+    "id": 32,
+    "status": "queued"
 }
 ```
 
@@ -196,11 +198,16 @@ GET /result/:jobId
 Example:
 ```json
 {
-  "jobId": 24,
-  "cvMatchRate": 0.71,
-  "projectScore": 4.9,
-  "overallSummary": "Candidate demonstrates strong backend potential...",
-  "usedFallback": false
+    "success": true,
+    "id": 32,
+    "status": "completed",
+    "result": {
+        "cv_match_rate": 0.74,
+        "cv_feedback": "CV evaluation available in parameter reasons, but no explicit cvFeedback field was provided.",
+        "project_score": 4,
+        "project_feedback": "Project evaluation available in parameter reasons, but no explicit projectFeedback field was provided.",
+        "overall_summary": "Muhammad Rafi Azmi is a promising candidate with a strong foundation in backend development....
+    }
 }
 ```
 
